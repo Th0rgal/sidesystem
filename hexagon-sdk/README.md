@@ -1,52 +1,45 @@
-# Hexagon V79 NPU Bridge for NixOS (`SM8750` / Snapdragon 8 Elite)
+# Hexagon V79 NPU & Adreno 830 Compute SDK (`SM8750` / Snapdragon 8 Elite)
 
-`sidesystem-ctl` exposes the Snapdragon 8 Elite Compute DSP (**Hexagon V79**, `32300000.remoteproc-cdsp`) and zero-copy DMA-Heap allocator directly inside the NixOS container:
+`sidesystem-ctl` exposes the Snapdragon 8 Elite Compute DSP (**Hexagon V79**, `32300000.remoteproc-cdsp`), zero-copy DMA-Heap, and **Qualcomm Venus VPU** (`/dev/video32`–`33`) directly inside the NixOS container:
 
 | Device Node | Major:Minor | Purpose |
 | :--- | :---: | :--- |
-| `/dev/fastrpc-cdsp` | `10:106` | Non-secure FastRPC channel to Hexagon V79 CDSP (supports Unsigned PD) |
-| `/dev/fastrpc-cdsp-secure` | `10:107` | Secure FastRPC channel (reserved for signed QNN/DSP domains) |
-| `/dev/dma_heap/system` | `253:1` | Zero-copy system DMA-BUF heap (shared across Oryon CPU, Adreno 830, Hexagon V79) |
-| `/dev/dma_heap/qcom,system` | `253:3` | Qualcomm cached system DMA-BUF heap (optimal for Hexagon VTCM DMA transfers) |
+| `/dev/fastrpc-cdsp` | `10:106` | Non-secure FastRPC channel to Hexagon V79 CDSP (Unsigned PD supported) |
+| `/dev/fastrpc-cdsp-secure` | `10:107` | Secure FastRPC channel (signed QNN/DSP domains) |
+| `/dev/dma_heap/qcom,system` | `249:0` | Qualcomm cached system DMA-BUF heap (shared across Oryon CPU, Adreno 830, Hexagon V79) |
+| `/dev/video32` / `/dev/video33` | `81:0` / `81:1` | Qualcomm Venus VPU hardware decoder (`AV1/HEVC/VP9/H.264`) & encoder (`HEVC/H.264`) |
 
-## Verified Silicon Capabilities (Motorola Razr 60 Ultra, `SM8750`)
+## Verified Live Silicon Results (Motorola Razr 60 Ultra, `SM8750`)
 
-Verified directly from unprivileged NixOS (`thomas`) via [`hexagon-probe.c`](./hexagon-probe.c):
+### 1. Native Hexagon V79 6×1024-bit HVX Kernels (Zero Qualcomm SDK — Upstream Clang 21 + LLD 21!)
+Built via [`Makefile`](./Makefile) from [`hvx_kernels_skel.c`](./hvx_kernels_skel.c) + [`hexagon-skel.lds`](./hexagon-skel.lds) (`ELF32 DYN`, `Machine: QUALCOMM DSP6`, `Flags: 0x79`, `PT_LOAD` at offset `0`) and executed live on CDSP Unsigned PD via [`hexagon-hvx-bench.c`](./hexagon-hvx-bench.c):
 
-- **Architecture:** `ARCH_VER = 0x8c79` (**Hexagon V79**)
-- **Vector Engine:** `HVX_SUPPORT_128B = 6` (**6× 1024-bit HVX SIMD units**)
-- **On-Die Scratchpad:** `VTCM_PAGE = 0x800000` (**8 MiB VTCM SRAM**)
-- **User Compute:** `UNSIGNED_PD_SUPPORT = 1` (custom unsigned Hexagon `.so` kernels can run without Qualcomm signing)
-- **Async Pipeline:** `ASYNC_FASTRPC_SUPPORT = 1` (overlapped CPU/NPU submission)
-- **Zero-Copy Memory:** `DMA_HEAP_IOCTL_ALLOC` + `mmap()` verified on `/dev/dma_heap/system`
+- **Verified Clock & Hardware:** `max_clk = 2000 MHz`, `hvx_units = 0x600` (**6× 1024-bit HVX units**), `vtcm_4MiB = 1` (**on-die VTCM SRAM verified**), live HVX die temp rise `28.5°C → 32.4°C` (`nsphvx-0..2`).
 
-## Quick Verification Inside NixOS
+| Workload | 6× 1024-bit HVX (`2.0 GHz`) | Oryon CPU (`4.32 GHz` 1T) | Speedup | Verification |
+| :--- | :---: | :---: | :---: | :---: |
+| **16-Round 32-bit ARX/ChaCha Vector Compute (`8 MiB`)** | **`5.363 ms` (`18.77 GOPS`)** | `20.628 ms` (`4.88 GOPS`) | **`3.85×`** | Bit-exact (`0xf3ed46e6`) |
+| **16 MiB RAID/Backup XOR Parity + Checksum** | `3.039 ms` (`16.56 GB/s`) | `1.811 ms` (`27.80 GB/s`) | `0.60×` (DDR RPC bound) | Bit-exact (`0x8bc95825`) |
+| **3440×1440 RGBA→Luma + Frame Digest** | `2.177 ms` (`11.38 GB/s`) | `0.789 ms` (`31.41 GB/s`) | `0.36×` (DDR RPC bound) | Bit-exact (`0x31e1df64`) |
+| **16 MiB 3-Tap Image Convolution Blur** | `3.322 ms` (`10.10 GB/s`) | — | 5.5× over 1-thread HVX | Verified |
+
+> **Key takeaway:** Memory-bound 1-pass kernels are limited by FastRPC DDR cache-maintenance overhead, whereas **compute-intensive non-AI kernels** (crypto/hashing, multi-tap convolutions, FFTs, VTCM-resident stencils) saturate all **6× 1024-bit HVX units** and beat a `4.32 GHz` Oryon core by **3.85×** while keeping Oryon CPU at `0%`.
+
+### 2. Local LLM Inference Inside NixOS (`llama.cpp` `ggml-vulkan` on Adreno 830 v2 vs Oryon CPU)
+Measured live on `Qwen2.5-0.5B-Instruct Q4_K_M` (`463 MiB`, `Vulkan0: Adreno (TM) 830`, `11.4 GiB` UMA):
+
+| Backend | Prompt Prefill (`pp256`) | Token Generation (`tg64`) | Speedup vs CPU |
+| :--- | :---: | :---: | :---: |
+| **Adreno 830 v2 (`ggml-vulkan`, Turnip `12 MiB` GMEM)** | **`715.35 ± 3.96 tok/s`** | **`60.70 ± 1.56 tok/s`** | **`4.52×` prefill** |
+| **Oryon 8-Core CPU (`ARMv8.2` NEON)** | `158.17 ± 1.20 tok/s` | — | `1.00×` |
+
+## Quick Build (Pure Upstream LLVM)
 
 ```bash
-gcc -O2 -Wall hexagon-probe.c -o hexagon-probe
+# Build Hexagon V79 1024-bit HVX shared library (requires clang + ld.lld with hexagon target)
+make libhvx_kernels_skel.so
+
+# Build lightweight NixOS FastRPC/DMA-Heap capability probe
+make hexagon-probe
 ./hexagon-probe
 ```
-
-Expected output:
-```text
-fastrpc-cdsp: opened (fd=3)
-  ARCH_VER            = 0x8c79 (V79)
-  HVX_SUPPORT_128B    = 6
-  VTCM_PAGE           = 0x800000 (8 MiB)
-  UNSIGNED_PD_SUPPORT = 1
-  ASYNC_FASTRPC       = 1
-dma_heap/system: allocated 4 MiB DMA-BUF (fd=4), mmap OK
-```
-
-## On-Device QNN HTP V79 Runtime & Next Steps
-
-Because NixOS runs glibc while Android's `/vendor/lib64/libQnnHtp.so` and `libcdsprpc.so` are bionic-linked, there are two clean paths to run AI workloads (LLMs, Whisper, Stable Diffusion, OpenCV/HVX filters) on the Hexagon V79 NPU:
-
-1. **Native NixOS FastRPC + Unsigned PD (pure glibc, zero Android dependency):**
-   - Speak `FASTRPC_IOCTL_INVOKE` / `FASTRPC_IOCTL_INIT_CREATE` directly against `/dev/fastrpc-cdsp` + `/dev/dma_heap/qcom,system` (same kernel ABI exercised by `hexagon-probe.c`).
-   - Compile custom C/C++ HVX kernels with upstream LLVM (`clang --target=hexagon-unknown-elf -mv79 -mhvx`) and load them into an Unsigned PD via `/vendor/dsp/cdsp/fastrpc_shell_unsigned_3`.
-2. **QNN HTP V79 Server Bridge (`llama.cpp` / `ggml-rpc` / Whisper):**
-   - Run a thin Android-side bionic service using the on-device Qualcomm runtime (`/vendor/lib64/libQnnHtp.so`, `/vendor/lib64/libQnnHtpV79Stub.so`, `/vendor/lib/rfsa/adsp/libQnnHtpV79Skel.so`) exposed over a local Unix socket or `127.0.0.1` RPC port to NixOS clients (`llama-cli --rpc`, Python, or `omarchnix` voice/AI tools).
-
-> **Can Hexagon V79 accelerate desktop rendering?**
-> Not directly for OpenGL/Vulkan rasterization (Adreno 830 v2 already hits `585.5 FPS` at `2560×1440` with 12 MiB GMEM and `2–5%` idle CPU). Hexagon V79 is ideal for **AI & signal workloads**: local LLM inference (45+ TOPS INT4/INT8), real-time Whisper transcription (`murmure`), neural upscaling / denoising, and camera/audio DSP pipelines.

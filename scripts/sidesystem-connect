@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# sidesystem-connect — One-command Mac/Linux <-> Razr SideSystem Superlink
+# Auto-detects USB-C adb (0.3 ms RTT via adb forward) or falls back to Wi-Fi IP,
+# then opens the Razr desktop in TigerVNC (Option+F auto-grabs fullscreen on Omarchnix).
+set -euo pipefail
+
+VNC_PORT="${VNC_PORT:-5900}"
+LOCAL_PORT="${LOCAL_PORT:-5901}"
+TARGET_HOST=""
+
+if command -v adb >/dev/null 2>&1 && adb get-state >/dev/null 2>&1; then
+    echo "[sidesystem-connect] USB-C adb detected — forwarding tcp:${LOCAL_PORT} -> tcp:${VNC_PORT} (~0.3 ms RTT)"
+    adb forward "tcp:${LOCAL_PORT}" "tcp:${VNC_PORT}" >/dev/null
+    TARGET_HOST="127.0.0.1:${LOCAL_PORT}"
+else
+    RAZR_IP="${1:-192.168.1.185}"
+    echo "[sidesystem-connect] No USB adb — connecting over Wi-Fi to ${RAZR_IP}:${VNC_PORT}"
+    TARGET_HOST="${RAZR_IP}:${VNC_PORT}"
+fi
+
+if command -v vncviewer >/dev/null 2>&1; then
+    exec vncviewer -RemoteResize=0 -Shared=1 "$TARGET_HOST"
+elif command -v wlvncc >/dev/null 2>&1; then
+    exec wlvncc "${TARGET_HOST%:*}" "${TARGET_HOST#*:}"
+else
+    echo "ERROR: No VNC viewer found (install tigervnc or wlvncc). Target ready at ${TARGET_HOST}" >&2
+    exit 1
+fi
