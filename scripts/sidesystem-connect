@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # sidesystem-connect — One-command Mac/Linux <-> Razr SideSystem Superlink
-# 1. Auto-detects active Hyprland monitor resolution & scale (e.g. 2560x1600@60 scale=1.6)
-# 2. Live-resizes the Razr's HEADLESS-1 output to match edge-to-edge (zero letterboxing)
-# 3. Auto-detects USB-C adb (~0.3 ms RTT via adb forward) or falls back to Wi-Fi IP
-# 4. Launches TigerVNC with -RemoteResize=1 (press Option+F for fullscreen + passthrough)
+# 1. Auto-detects USB-C adb (~0.3 ms RTT via adb forward) or falls back to Wi-Fi IP
+# 2. Launches TigerVNC (rock-solid, zero tile artifacts)
+# 3. Live-syncs Razr HEADLESS-1 resolution to match the exact VNC window size
+#    whenever you tile, resize, or press Option+F (fullscreen + passthrough)
 set -euo pipefail
 export PATH="/run/current-system/sw/bin:/etc/profiles/per-user/${USER:-thomas}/bin:${HOME}/.nix-profile/bin:${HOME}/.local/bin:${PATH:-/usr/bin:/bin}"
 
@@ -12,26 +12,10 @@ LOCAL_PORT="${LOCAL_PORT:-5901}"
 TARGET_HOST=""
 USE_ADB=0
 
-# Detect focused monitor resolution & scale on host Hyprland (fallback: 2560x1600@60 scale=1.6)
-MON_RES="2560x1600@60"
-MON_SCALE="1.6"
-if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    MON_JSON="$(hyprctl monitors -j 2>/dev/null || true)"
-    if [ -n "$MON_JSON" ]; then
-        parsed="$(printf '%s' "$MON_JSON" | jq -r '(.[] | select(.focused == true)) // .[0] | "\(.width)x\(.height)@\(.refreshRate | floor) \(.scale)"' 2>/dev/null || true)"
-        if [ -n "$parsed" ]; then
-            MON_RES="${parsed%% *}"
-            MON_SCALE="${parsed#* }"
-        fi
-    fi
-fi
-
 if command -v adb >/dev/null 2>&1 && adb get-state >/dev/null 2>&1; then
     USE_ADB=1
-    echo "[sidesystem-connect] USB-C adb detected — syncing Razr display to ${MON_RES} (scale=${MON_SCALE}) & forwarding tcp:${LOCAL_PORT} -> tcp:${VNC_PORT}"
+    echo "[sidesystem-connect] USB-C adb detected — forwarding tcp:${LOCAL_PORT} -> tcp:${VNC_PORT} (~0.3 ms RTT)"
     adb forward "tcp:${LOCAL_PORT}" "tcp:${VNC_PORT}" >/dev/null
-    # Live-resize Razr HEADLESS-1 to match active host monitor edge-to-edge
-    adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.monitor({ output = \\\\\\\"HEADLESS-1\\\\\\\", mode = \\\\\\\"${MON_RES}\\\\\\\", position = \\\\\\\"0x0\\\\\\\", scale = \\\\\\\"${MON_SCALE}\\\\\\\" })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
     TARGET_HOST="127.0.0.1:${LOCAL_PORT}"
 else
     RAZR_IP="${1:-192.168.1.185}"
@@ -39,13 +23,52 @@ else
     TARGET_HOST="${RAZR_IP}:${VNC_PORT}"
 fi
 
-if command -v wlvncc >/dev/null 2>&1; then
-    exec wlvncc "${TARGET_HOST%:*}" "${TARGET_HOST#*:}"
+# Live window-size syncer: watches Vncviewer geometry on host Hyprland and resizes Razr HEADLESS-1
+# pixel-for-pixel whenever the window opens, tiles, resizes, or toggles Option+F fullscreen.
+resize_razr() {
+    local w="$1" h="$2"
+    [ "$USE_ADB" -eq 1 ] || return 0
+    # Clamp to sane even dimensions
+    w=$(( (w / 2) * 2 ))
+    h=$(( (h / 2) * 2 ))
+    [ "$w" -ge 320 ] && [ "$h" -ge 240 ] || return 0
+    adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.monitor({ output = \\\\\\\"HEADLESS-1\\\\\\\", mode = \\\\\\\"${w}x${h}@60\\\\\\\", position = \\\\\\\"0x0\\\\\\\", scale = \\\\\\\"1\\\\\\\" })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
+}
+
+start_resize_watcher() {
+    local vnc_pid="$1"
+    [ "$USE_ADB" -eq 1 ] || return 0
+    command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
+    (
+        last_sz=""
+        while kill -0 "$vnc_pid" 2>/dev/null; do
+            sz="$(hyprctl clients -j 2>/dev/null | jq -r '
+                (.[] | select((.class | ascii_downcase | contains("vnc")) or (.title | ascii_downcase | contains("tigervnc"))))
+                | "\(.size[0]) \(.size[1])"
+            ' 2>/dev/null | head -n 1 || true)"
+            if [ -n "$sz" ] && [ "$sz" != "$last_sz" ]; then
+                last_sz="$sz"
+                w="${sz%% *}"
+                h="${sz#* }"
+                resize_razr "$w" "$h"
+            fi
+            sleep 0.25
+        done
+    ) >/dev/null 2>&1 &
+}
+
+VNC_ARGS=(-RemoteResize=0 -Shared=1 -FullscreenSystemKeys=1)
+
+if command -v vncviewer >/dev/null 2>&1; then
+    vncviewer "${VNC_ARGS[@]}" "$TARGET_HOST" &
+    VPID=$!
 elif command -v nix >/dev/null 2>&1; then
-    exec nix run nixpkgs#wlvncc -- "${TARGET_HOST%:*}" "${TARGET_HOST#*:}"
-elif command -v vncviewer >/dev/null 2>&1; then
-    exec vncviewer -RemoteResize=1 -Shared=1 -FullscreenSystemKeys=1 "$TARGET_HOST"
+    nix run nixpkgs#tigervnc -- "${VNC_ARGS[@]}" "$TARGET_HOST" &
+    VPID=$!
 else
-    echo "ERROR: No VNC viewer found (install wlvncc or tigervnc). Target ready at ${TARGET_HOST}" >&2
+    echo "ERROR: No VNC viewer found (install tigervnc). Target ready at ${TARGET_HOST}" >&2
     exit 1
 fi
+
+start_resize_watcher "$VPID"
+wait "$VPID"
