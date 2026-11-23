@@ -1,76 +1,87 @@
 #!/usr/bin/env bash
-# sidesystem-connect — One-command Mac/Linux <-> Razr SideSystem Superlink
-# 1. Auto-detects USB-C adb (~0.3 ms RTT via adb forward) or falls back to Wi-Fi IP
-# 2. Launches TigerVNC (rock-solid, zero tile artifacts)
-# 3. Live-syncs Razr HEADLESS-1 resolution to match the exact VNC window size
-#    whenever you tile, resize, or press Option+F (fullscreen + passthrough)
+# sidesystem-connect — Ultra-low-latency Sunshine + Moonlight (UDP + HW Decode) Razr Superlink
+# Default: Moonlight over UDP (60 FPS, 60 Mbps H.264, Apple M2 AVD HW decode, native Wayland HiDPI)
+# Fallback: pass --vnc to use TigerVNC over USB-C adb forward
 set -euo pipefail
 export PATH="/run/current-system/sw/bin:/etc/profiles/per-user/${USER:-thomas}/bin:${HOME}/.nix-profile/bin:${HOME}/.local/bin:${PATH:-/usr/bin:/bin}"
 
+MODE="moonlight"
+if [ "${1:-}" = "--vnc" ]; then
+    MODE="vnc"
+    shift
+fi
+
+RAZR_IP="${1:-192.168.1.185}"
 VNC_PORT="${VNC_PORT:-5900}"
 LOCAL_PORT="${LOCAL_PORT:-5901}"
-TARGET_HOST=""
 USE_ADB=0
 
 if command -v adb >/dev/null 2>&1 && adb get-state >/dev/null 2>&1; then
     USE_ADB=1
-    echo "[sidesystem-connect] USB-C adb detected — forwarding tcp:${LOCAL_PORT} -> tcp:${VNC_PORT} (~0.3 ms RTT)"
+fi
+
+# Auto-detect focused host monitor resolution & scale (e.g. 2560x1600@60 scale=1.6)
+MON_W=2560
+MON_H=1600
+MON_HZ=60
+MON_SCALE="1.6"
+if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    MON_JSON="$(hyprctl monitors -j 2>/dev/null || true)"
+    if [ -n "$MON_JSON" ]; then
+        parsed="$(printf '%s' "$MON_JSON" | jq -r '(.[] | select(.focused == true)) // .[0] | "\(.width) \(.height) \(.refreshRate | floor) \(.scale)"' 2>/dev/null || true)"
+        if [ -n "$parsed" ]; then
+            read -r MON_W MON_H MON_HZ MON_SCALE <<< "$parsed"
+        fi
+    fi
+fi
+
+# Refresh Razr Wi-Fi IP over adb if connected via USB
+if [ "$USE_ADB" -eq 1 ]; then
+    adb_ip="$(adb shell 'ip -4 addr show dev wlan0 2>/dev/null | sed -n "s/.*inet \([0-9.]*\)\/.*/\1/p" | head -n 1' 2>/dev/null | tr -d '\r\n ' || true)"
+    [ -n "$adb_ip" ] && RAZR_IP="$adb_ip"
+fi
+
+if [ "$MODE" = "moonlight" ]; then
+    if [ "$USE_ADB" -eq 1 ]; then
+        echo "[sidesystem-connect] Syncing Razr HEADLESS-1 to ${MON_W}x${MON_H}@${MON_HZ} (scale=${MON_SCALE}) & refreshing Sunshine input bridge..."
+        adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.monitor({ output = \\\\\\\"HEADLESS-1\\\\\\\", mode = \\\\\\\"${MON_W}x${MON_H}@${MON_HZ}\\\\\\\", position = \\\\\\\"0x0\\\\\\\", scale = \\\\\\\"${MON_SCALE}\\\\\\\" })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
+        # Restart bt-hid-bridge --sunshine so it picks up the exact new WxH framebuffer dimensions
+        adb shell 'su -c "killall bt-hid-bridge 2>/dev/null || true; sleep 0.2; setsid /data/local/nixos/bin/bt-hid-bridge --sunshine 5900 >/data/local/nixos/sunshine-input.log 2>&1 </dev/null &"' </dev/null >/dev/null 2>&1 &
+        sleep 0.5
+    fi
+
+    echo "[sidesystem-connect] Launching Moonlight UDP stream (${RAZR_IP}, ${MON_W}x${MON_H}@${MON_HZ}, 60 Mbps, HW decode)..."
+    ML_ARGS=(
+        stream "$RAZR_IP" "Desktop"
+        --resolution "${MON_W}x${MON_H}"
+        --fps "$MON_HZ"
+        --bitrate 60000
+        --display-mode windowed
+        --absolute-mouse
+        --no-vsync
+        --no-frame-pacing
+    )
+    if command -v moonlight >/dev/null 2>&1; then
+        exec moonlight "${ML_ARGS[@]}"
+    elif [ -x /nix/store/j5b76lij5nhyv6hz6i2kpwimzfki4y4l-moonlight-qt-6.2.0/bin/moonlight ]; then
+        exec /nix/store/j5b76lij5nhyv6hz6i2kpwimzfki4y4l-moonlight-qt-6.2.0/bin/moonlight "${ML_ARGS[@]}"
+    elif command -v nix >/dev/null 2>&1; then
+        exec nix run nixpkgs#moonlight-qt -- "${ML_ARGS[@]}"
+    else
+        echo "ERROR: moonlight not found." >&2
+        exit 1
+    fi
+fi
+
+# --- VNC fallback (--vnc) ---
+TARGET_HOST="${RAZR_IP}:${VNC_PORT}"
+if [ "$USE_ADB" -eq 1 ]; then
     adb forward "tcp:${LOCAL_PORT}" "tcp:${VNC_PORT}" >/dev/null
     TARGET_HOST="127.0.0.1:${LOCAL_PORT}"
-else
-    RAZR_IP="${1:-192.168.1.185}"
-    echo "[sidesystem-connect] No USB adb — connecting over Wi-Fi to ${RAZR_IP}:${VNC_PORT}"
-    TARGET_HOST="${RAZR_IP}:${VNC_PORT}"
 fi
-
-# Live window-size syncer: watches Vncviewer geometry + monitor scale on host Hyprland
-# and resizes Razr HEADLESS-1 to exact physical pixels (size * monitor_scale) with matching DPI scale
-# whenever the window opens, tiles, resizes, or toggles Option+F fullscreen.
-resize_razr() {
-    local w="$1" h="$2" s="$3"
-    [ "$USE_ADB" -eq 1 ] || return 0
-    # Clamp to sane even dimensions
-    w=$(( (w / 2) * 2 ))
-    h=$(( (h / 2) * 2 ))
-    [ "$w" -ge 320 ] && [ "$h" -ge 240 ] || return 0
-    adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.monitor({ output = \\\\\\\"HEADLESS-1\\\\\\\", mode = \\\\\\\"${w}x${h}@60\\\\\\\", position = \\\\\\\"0x0\\\\\\\", scale = \\\\\\\"${s}\\\\\\\" })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
-}
-
-start_resize_watcher() {
-    local vnc_pid="$1"
-    [ "$USE_ADB" -eq 1 ] || return 0
-    command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 0
-    (
-        last_sz=""
-        while kill -0 "$vnc_pid" 2>/dev/null; do
-            mons="$(hyprctl monitors -j 2>/dev/null || echo '[]')"
-            sz="$(hyprctl clients -j 2>/dev/null | jq -r --argjson mons "$mons" '
-                (.[] | select((.class | ascii_downcase | contains("vnc")) or (.title | ascii_downcase | contains("tigervnc")))) as $c
-                | ($mons[] | select(.id == $c.monitor) | .scale) as $s
-                | "\(($c.size[0] * $s) | round) \(($c.size[1] * $s) | round) \($s)"
-            ' 2>/dev/null | head -n 1 || true)"
-            if [ -n "$sz" ] && [ "$sz" != "$last_sz" ]; then
-                last_sz="$sz"
-                read -r w h s <<< "$sz"
-                resize_razr "$w" "$h" "$s"
-            fi
-            sleep 0.25
-        done
-    ) >/dev/null 2>&1 &
-}
-
 VNC_ARGS=(-RemoteResize=0 -Shared=1 -FullscreenSystemKeys=1 -PreferredEncoding=Tight -CompressLevel=1 -QualityLevel=9)
-
 if command -v vncviewer >/dev/null 2>&1; then
-    vncviewer "${VNC_ARGS[@]}" "$TARGET_HOST" &
-    VPID=$!
-elif command -v nix >/dev/null 2>&1; then
-    nix run nixpkgs#tigervnc -- "${VNC_ARGS[@]}" "$TARGET_HOST" &
-    VPID=$!
+    exec vncviewer "${VNC_ARGS[@]}" "$TARGET_HOST"
 else
-    echo "ERROR: No VNC viewer found (install tigervnc). Target ready at ${TARGET_HOST}" >&2
-    exit 1
+    exec nix run nixpkgs#tigervnc -- "${VNC_ARGS[@]}" "$TARGET_HOST"
 fi
-
-start_resize_watcher "$VPID"
-wait "$VPID"

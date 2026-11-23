@@ -8,4 +8,4 @@ Icon=sidesystem
 Terminal=false
 Categories=System;Network;RemoteAccess;
 Keywords=razr;sidesystem;phone;android;vnc;remote;desktop;nixos;
-StartupWMClass=wlvncc
+StartupWMClass=com.moonlight_stream.Moonlight

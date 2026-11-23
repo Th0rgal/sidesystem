@@ -826,10 +826,33 @@ if [ ! -f "${HOME}/.config/omarchy/workspace-wallpapers.json" ] && command -v sw
     fi
 fi
 
-# Launch wayvnc attached to headless sway's Wayland socket on 127.0.0.1:<VNC_PORT>.
-# -r renders the Wayland cursor into the stream so BT mouse & remote pointer stay visible.
+# Launch wayvnc (serves local Wayland virtual input injection + optional VNC fallback).
 WAYLAND_DISPLAY="$SWAY_SOCK" \
     nohup wayvnc -r -f 60 127.0.0.1 "$VNC_PORT" >"${XDG_RUNTIME_DIR}/wayvnc.log" 2>&1 </dev/null &
+
+# Launch Sunshine (ultra-low-latency UDP H.264/HEVC streaming for Moonlight clients).
+SUNSHINE_BIN="$(command -v sunshine 2>/dev/null || ls -1 /nix/store/*-sunshine-*/bin/sunshine 2>/dev/null | head -n 1 || true)"
+if [ -n "$SUNSHINE_BIN" ] && [ -x "$SUNSHINE_BIN" ]; then
+    mkdir -p "${HOME}/.config/sunshine"
+    if [ ! -f "${HOME}/.config/sunshine/sunshine.conf" ]; then
+        cat > "${HOME}/.config/sunshine/sunshine.conf" <<SUNEOF
+capture = wlr
+encoder = software
+sw_preset = ultrafast
+sw_tune = zerolatency
+min_threads = 4
+qp = 22
+lan_encryption_mode = 0
+fec_percentage = 5
+upnp = disabled
+origin_web_ui_allowed = lan
+sunshine_name = Razr-SideSystem
+min_log_level = info
+SUNEOF
+    fi
+    WAYLAND_DISPLAY="$HYPR_SOCK" \
+        nohup "$SUNSHINE_BIN" "${HOME}/.config/sunshine/sunshine.conf" >"${XDG_RUNTIME_DIR}/sunshine.log" 2>&1 </dev/null &
+fi
 
 exit 0
 EOF
@@ -871,7 +894,8 @@ ensure_container_hw_bridge() {
         chmod 666 /var/lib/sidesystem/power-profile-req
         [ -c /dev/fastrpc-cdsp ] || mknod -m 666 /dev/fastrpc-cdsp c 10 106 2>/dev/null || true
         [ -c /dev/fastrpc-cdsp-secure ] || mknod -m 666 /dev/fastrpc-cdsp-secure c 10 107 2>/dev/null || true
-        chmod 666 /dev/fastrpc-cdsp /dev/fastrpc-cdsp-secure 2>/dev/null || true
+        [ -c /dev/uinput ] || mknod -m 666 /dev/uinput c 10 223 2>/dev/null || true
+        chmod 666 /dev/fastrpc-cdsp /dev/fastrpc-cdsp-secure /dev/uinput 2>/dev/null || true
     ' >/dev/null 2>&1 || true
 
     # Start single-instance host-side power-profile request watcher on shared F2FS /var/lib/sidesystem
