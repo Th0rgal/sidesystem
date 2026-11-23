@@ -515,7 +515,7 @@ int main(void) {
     g_bus_own_name(G_BUS_TYPE_SYSTEM, "org.freedesktop.UPower",
                    G_BUS_NAME_OWNER_FLAGS_ALLOW_REPLACEMENT | G_BUS_NAME_OWNER_FLAGS_REPLACE,
                    on_bus_acquired, NULL, NULL, NULL, NULL);
-    g_timeout_add_seconds(3, poll_sysfs, NULL);
+    g_timeout_add_seconds(5, poll_sysfs, NULL);
     g_main_loop_run(loop);
     return 0;
 }

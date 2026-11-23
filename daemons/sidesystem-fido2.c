@@ -903,7 +903,7 @@ int main(void) {
 
     struct pollfd pfd = { .fd = g_uhid_fd, .events = POLLIN };
     while (g_running) {
-        int pr = poll(&pfd, 1, 500);
+        int pr = poll(&pfd, 1, -1);
         if (pr <= 0) continue;
 
         struct uhid_event in;
