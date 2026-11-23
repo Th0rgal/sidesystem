@@ -57,7 +57,7 @@ start_resize_watcher() {
     ) >/dev/null 2>&1 &
 }
 
-VNC_ARGS=(-RemoteResize=0 -Shared=1 -FullscreenSystemKeys=1)
+VNC_ARGS=(-RemoteResize=0 -Shared=1 -FullscreenSystemKeys=1 -PreferredEncoding=Tight -CompressLevel=1 -QualityLevel=9)
 
 if command -v vncviewer >/dev/null 2>&1; then
     vncviewer "${VNC_ARGS[@]}" "$TARGET_HOST" &
