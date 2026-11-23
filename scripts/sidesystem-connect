@@ -62,6 +62,7 @@ if [ "$MODE" = "moonlight" ]; then
         --resolution "${MON_W}x${MON_H}"
         --fps "$MON_HZ"
         --bitrate 60000
+        --video-decoder software
         --display-mode windowed
         --absolute-mouse
         --no-vsync
