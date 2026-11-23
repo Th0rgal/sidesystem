@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# sidesystem-connect — Ultra-low-latency Sunshine + Moonlight (UDP + HW Decode) Razr Superlink
-# Default: Moonlight over UDP (60 FPS, 60 Mbps H.264, Apple M2 AVD HW decode, native Wayland HiDPI)
-# Fallback: pass --vnc to use TigerVNC over USB-C adb forward
+# sidesystem-connect — Cable-optional, fastest-link Razr SideSystem Superlink
+# Automatically picks the fastest transport:
+#   1. USB-C RNDIS / USB Ethernet (if USB tethering is active: ~0.3 ms UDP, ~1 Gbps)
+#   2. Wi-Fi LAN (works completely cable-free! Auto-discovers via mDNS / cached IP / adb)
+# Syncs Razr HEADLESS-1 resolution to your focused monitor over adb OR passwordless SSH,
+# then launches Moonlight over UDP (60 FPS, 60 Mbps H.264, native Wayland HiDPI).
+# Pass --vnc for TigerVNC fallback.
 set -euo pipefail
 export PATH="/run/current-system/sw/bin:/etc/profiles/per-user/${USER:-thomas}/bin:${HOME}/.nix-profile/bin:${HOME}/.local/bin:${PATH:-/usr/bin:/bin}"
 
@@ -11,7 +15,8 @@ if [ "${1:-}" = "--vnc" ]; then
     shift
 fi
 
-RAZR_IP="${1:-192.168.1.185}"
+IP_CACHE="${HOME}/.cache/sidesystem-razr-ip"
+mkdir -p "${HOME}/.cache"
 VNC_PORT="${VNC_PORT:-5900}"
 LOCAL_PORT="${LOCAL_PORT:-5901}"
 USE_ADB=0
@@ -35,28 +40,73 @@ if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     fi
 fi
 
-# Refresh Razr Wi-Fi IP over adb if connected via USB
-if [ "$USE_ADB" -eq 1 ]; then
-    adb_ip="$(adb shell 'ip -4 addr show dev wlan0 2>/dev/null | sed -n "s/.*inet \([0-9.]*\)\/.*/\1/p" | head -n 1' 2>/dev/null | tr -d '\r\n ' || true)"
-    [ -n "$adb_ip" ] && RAZR_IP="$adb_ip"
+# Pick the fastest reachable IP for Razr:
+#   1. Explicit CLI argument
+#   2. USB-C RNDIS / tethering gateway (fastest UDP: ~0.3 ms, zero Wi-Fi jitter)
+#   3. Live Wi-Fi IP via adb (and cache it for cable-free use)
+#   4. Cached IP (~/.cache/sidesystem-razr-ip) or mDNS razr.local or default 192.168.1.185
+RAZR_IP="${1:-}"
+LINK_KIND="Wi-Fi"
+
+if [ -z "$RAZR_IP" ]; then
+    # Check if Android USB-C RNDIS tethering interface is active on host
+    usb_gw="$(ip -4 route show 2>/dev/null | awk '/dev (usb|enp.*u|rndis)/ && /via/ {print $3; exit}' || true)"
+    if [ -n "$usb_gw" ] && timeout 0.5 bash -c "</dev/tcp/${usb_gw}/47989" 2>/dev/null; then
+        RAZR_IP="$usb_gw"
+        LINK_KIND="USB-C RNDIS"
+    fi
+fi
+
+if [ -z "$RAZR_IP" ] && [ "$USE_ADB" -eq 1 ]; then
+    # Prefer USB-C rndis0 IP on Razr if tethering is on, else wlan0
+    adb_usb_ip="$(adb shell 'ip -4 addr show dev rndis0 2>/dev/null | sed -n "s/.*inet \([0-9.]*\)\/.*/\1/p" | head -n 1' 2>/dev/null | tr -d '\r\n ' || true)"
+    if [ -n "$adb_usb_ip" ] && timeout 0.5 bash -c "</dev/tcp/${adb_usb_ip}/47989" 2>/dev/null; then
+        RAZR_IP="$adb_usb_ip"
+        LINK_KIND="USB-C RNDIS"
+    else
+        adb_wifi_ip="$(adb shell 'ip -4 addr show dev wlan0 2>/dev/null | sed -n "s/.*inet \([0-9.]*\)\/.*/\1/p" | head -n 1' 2>/dev/null | tr -d '\r\n ' || true)"
+        if [ -n "$adb_wifi_ip" ]; then
+            RAZR_IP="$adb_wifi_ip"
+            printf '%s\n' "$RAZR_IP" > "$IP_CACHE"
+            LINK_KIND="Wi-Fi (via adb)"
+        fi
+    fi
+fi
+
+if [ -z "$RAZR_IP" ]; then
+    # Fully cable-free discovery: try cached IP, then mDNS razr.local, then 192.168.1.185
+    cached_ip="$(cat "$IP_CACHE" 2>/dev/null | tr -d '\r\n ' || true)"
+    mdns_ip="$(getent ahostsv4 razr.local 2>/dev/null | awk 'NR==1{print $1}' || true)"
+    for cand in "$cached_ip" "$mdns_ip" "192.168.1.185"; do
+        [ -n "$cand" ] || continue
+        if timeout 1 bash -c "</dev/tcp/${cand}/47989" 2>/dev/null || timeout 1 bash -c "</dev/tcp/${cand}/2222" 2>/dev/null; then
+            RAZR_IP="$cand"
+            printf '%s\n' "$RAZR_IP" > "$IP_CACHE"
+            break
+        fi
+    done
+    RAZR_IP="${RAZR_IP:-${cached_ip:-192.168.1.185}}"
 fi
 
 if [ "$MODE" = "moonlight" ]; then
     if [ "$USE_ADB" -eq 1 ]; then
-        # Auto-start Razr desktop + Sunshine if not currently running
+        # Auto-start Razr desktop + Sunshine if stopped
         if ! timeout 1 bash -c "</dev/tcp/${RAZR_IP}/47989" 2>/dev/null; then
             echo "[sidesystem-connect] Razr desktop/Sunshine not running — starting automatically..."
             adb shell "su -c '/data/local/nixos/bin/sidesystem-ctl desktop start ${MON_W}x${MON_H} 1.5 hw'" >/dev/null 2>&1 || true
             sleep 2
         fi
-        echo "[sidesystem-connect] Syncing Razr HEADLESS-1 to ${MON_W}x${MON_H}@${MON_HZ} (scale=${MON_SCALE}) & refreshing Sunshine input bridge..."
         adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.monitor({ output = \\\\\\\"HEADLESS-1\\\\\\\", mode = \\\\\\\"${MON_W}x${MON_H}@${MON_HZ}\\\\\\\", position = \\\\\\\"0x0\\\\\\\", scale = \\\\\\\"${MON_SCALE}\\\\\\\" })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
-        # Restart bt-hid-bridge --sunshine so it picks up the exact new WxH framebuffer dimensions
         adb shell 'su -c "killall bt-hid-bridge 2>/dev/null || true; sleep 0.2; setsid /data/local/nixos/bin/bt-hid-bridge --sunshine 5900 >/data/local/nixos/sunshine-input.log 2>&1 </dev/null &"' </dev/null >/dev/null 2>&1 &
-        sleep 0.5
+        sleep 0.4
+    else
+        # Cable-free Wi-Fi resolution sync via passwordless SSH (port 2222)
+        ssh -o ConnectTimeout=2 -o BatchMode=yes -p 2222 "thomas@${RAZR_IP}" \
+            "set -a; . /tmp/xdg-razr/session.env; set +a; hyprctl eval 'hl.monitor({ output = \"HEADLESS-1\", mode = \"${MON_W}x${MON_H}@${MON_HZ}\", position = \"0x0\", scale = \"${MON_SCALE}\" })'" \
+            >/dev/null 2>&1 || true
     fi
 
-    echo "[sidesystem-connect] Launching Moonlight UDP stream (${RAZR_IP}, ${MON_W}x${MON_H}@${MON_HZ}, 60 Mbps, HW decode)..."
+    echo "[sidesystem-connect] Launching Moonlight UDP over ${LINK_KIND} (${RAZR_IP}, ${MON_W}x${MON_H}@${MON_HZ}, 60 Mbps)..."
     ML_ARGS=(
         stream "$RAZR_IP" "Desktop"
         --resolution "${MON_W}x${MON_H}"

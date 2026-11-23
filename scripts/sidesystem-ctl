@@ -863,6 +863,12 @@ EOF
         || die "Failed to start desktop session inside container"
 
     ensure_container_hw_bridge
+    # Ensure Sunshine uinput -> Wayland input bridge is running (works completely cable-free!)
+    if [ -x "${BASE_DIR}/bin/bt-hid-bridge" ]; then
+        killall bt-hid-bridge 2>/dev/null || true
+        sleep 0.2
+        setsid "${BASE_DIR}/bin/bt-hid-bridge" --sunshine "$VNC_PORT" >"${BASE_DIR}/sunshine-input.log" 2>&1 </dev/null &
+    fi
     apply_profile_live "$PROFILE" || true
     log "Desktop started (${DISPLAY_MODE}, scale=${DISPLAY_SCALE}, gpu=${GPU_MODE}, profile=${PROFILE}, VNC 127.0.0.1:${VNC_PORT})."
 }
