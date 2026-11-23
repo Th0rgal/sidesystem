@@ -43,6 +43,12 @@ fi
 
 if [ "$MODE" = "moonlight" ]; then
     if [ "$USE_ADB" -eq 1 ]; then
+        # Auto-start Razr desktop + Sunshine if not currently running
+        if ! timeout 1 bash -c "</dev/tcp/${RAZR_IP}/47989" 2>/dev/null; then
+            echo "[sidesystem-connect] Razr desktop/Sunshine not running — starting automatically..."
+            adb shell "su -c '/data/local/nixos/bin/sidesystem-ctl desktop start ${MON_W}x${MON_H} 1.5 hw'" >/dev/null 2>&1 || true
+            sleep 2
+        fi
         echo "[sidesystem-connect] Syncing Razr HEADLESS-1 to ${MON_W}x${MON_H}@${MON_HZ} (scale=${MON_SCALE}) & refreshing Sunshine input bridge..."
         adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.monitor({ output = \\\\\\\"HEADLESS-1\\\\\\\", mode = \\\\\\\"${MON_W}x${MON_H}@${MON_HZ}\\\\\\\", position = \\\\\\\"0x0\\\\\\\", scale = \\\\\\\"${MON_SCALE}\\\\\\\" })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
         # Restart bt-hid-bridge --sunshine so it picks up the exact new WxH framebuffer dimensions
