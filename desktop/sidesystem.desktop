@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=SideSystem
+GenericName=Razr NixOS Desktop
+Comment=Connect to your Motorola Razr 60 Ultra NixOS desktop (USB-C / Wi-Fi)
+Exec=/home/thomas/.local/bin/sidesystem-connect
+Icon=sidesystem
+Terminal=false
+Categories=System;Network;RemoteAccess;
+Keywords=razr;sidesystem;phone;android;vnc;remote;desktop;nixos;
+StartupWMClass=wlvncc

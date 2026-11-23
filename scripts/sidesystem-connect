@@ -5,6 +5,7 @@
 # 3. Auto-detects USB-C adb (~0.3 ms RTT via adb forward) or falls back to Wi-Fi IP
 # 4. Launches TigerVNC with -RemoteResize=1 (press Option+F for fullscreen + passthrough)
 set -euo pipefail
+export PATH="/run/current-system/sw/bin:/etc/profiles/per-user/${USER:-thomas}/bin:${HOME}/.nix-profile/bin:${HOME}/.local/bin:${PATH:-/usr/bin:/bin}"
 
 VNC_PORT="${VNC_PORT:-5900}"
 LOCAL_PORT="${LOCAL_PORT:-5901}"
