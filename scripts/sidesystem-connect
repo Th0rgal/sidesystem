@@ -22,6 +22,8 @@ if command -v vncviewer >/dev/null 2>&1; then
     exec vncviewer -RemoteResize=0 -Shared=1 "$TARGET_HOST"
 elif command -v wlvncc >/dev/null 2>&1; then
     exec wlvncc "${TARGET_HOST%:*}" "${TARGET_HOST#*:}"
+elif command -v nix >/dev/null 2>&1; then
+    exec nix run nixpkgs#tigervnc -- -RemoteResize=0 -Shared=1 "$TARGET_HOST"
 else
     echo "ERROR: No VNC viewer found (install tigervnc or wlvncc). Target ready at ${TARGET_HOST}" >&2
     exit 1
