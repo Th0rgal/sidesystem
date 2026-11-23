@@ -588,11 +588,14 @@ export PATH="${HOME}/.local/bin:/run/current-system/sw/bin:/etc/profiles/per-use
 export XDG_RUNTIME_DIR="/tmp/xdg-razr"
 
 # Clean up any previous desktop stack (match wrapped binaries like .Hyprland-wrapped too).
-for proc in wayvnc omarchy-launch-shell quickshell swaybg start-hyprland Hyprland sway; do
+# Also mask/stop hypridle so headless VNC outputs are never DPMS-blanked or auto-locked behind Android's lockscreen.
+systemctl --user stop hypridle.service 2>/dev/null || true
+systemctl --user mask hypridle.service 2>/dev/null || true
+for proc in hypridle hyprlock wayvnc omarchy-launch-shell quickshell swaybg start-hyprland Hyprland sway; do
     pkill -TERM -f "$proc" 2>/dev/null || true
 done
 sleep 1
-for proc in wayvnc omarchy-launch-shell quickshell swaybg start-hyprland Hyprland sway; do
+for proc in hypridle hyprlock wayvnc omarchy-launch-shell quickshell swaybg start-hyprland Hyprland sway; do
     pkill -KILL -f "$proc" 2>/dev/null || true
 done
 
@@ -798,10 +801,11 @@ __EGL_VENDOR_LIBRARY_FILENAMES=${__EGL_VENDOR_LIBRARY_FILENAMES:-}
 TU_DEBUG=${TU_DEBUG:-}
 ENVEOF
 
-# Launch Omarchy shell bar & plugins.
+# Launch Omarchy shell bar & plugins (and ensure hypridle stays stopped so VNC never auto-locks).
 if command -v omarchy-launch-shell >/dev/null 2>&1; then
     nohup omarchy-launch-shell >"${XDG_RUNTIME_DIR}/omarchy-shell.log" 2>&1 </dev/null &
 fi
+(sleep 3; pkill -9 hypridle 2>/dev/null || true) >/dev/null 2>&1 </dev/null &
 
 # Launch wallpaper via swaybg ONLY if the per-Space workspace-wallpapers plugin is not installed.
 if [ ! -f "${HOME}/.config/omarchy/workspace-wallpapers.json" ] && command -v swaybg >/dev/null 2>&1; then

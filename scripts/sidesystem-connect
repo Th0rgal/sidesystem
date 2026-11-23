@@ -1,16 +1,36 @@
 #!/usr/bin/env bash
 # sidesystem-connect — One-command Mac/Linux <-> Razr SideSystem Superlink
-# Auto-detects USB-C adb (0.3 ms RTT via adb forward) or falls back to Wi-Fi IP,
-# then opens the Razr desktop in TigerVNC (Option+F auto-grabs fullscreen on Omarchnix).
+# 1. Auto-detects active Hyprland monitor resolution & scale (e.g. 2560x1600@60 scale=1.6)
+# 2. Live-resizes the Razr's HEADLESS-1 output to match edge-to-edge (zero letterboxing)
+# 3. Auto-detects USB-C adb (~0.3 ms RTT via adb forward) or falls back to Wi-Fi IP
+# 4. Launches TigerVNC with -RemoteResize=1 (press Option+F for fullscreen + passthrough)
 set -euo pipefail
 
 VNC_PORT="${VNC_PORT:-5900}"
 LOCAL_PORT="${LOCAL_PORT:-5901}"
 TARGET_HOST=""
+USE_ADB=0
+
+# Detect focused monitor resolution & scale on host Hyprland (fallback: 2560x1600@60 scale=1.6)
+MON_RES="2560x1600@60"
+MON_SCALE="1.6"
+if command -v hyprctl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    MON_JSON="$(hyprctl monitors -j 2>/dev/null || true)"
+    if [ -n "$MON_JSON" ]; then
+        parsed="$(printf '%s' "$MON_JSON" | jq -r '(.[] | select(.focused == true)) // .[0] | "\(.width)x\(.height)@\(.refreshRate | floor) \(.scale)"' 2>/dev/null || true)"
+        if [ -n "$parsed" ]; then
+            MON_RES="${parsed%% *}"
+            MON_SCALE="${parsed#* }"
+        fi
+    fi
+fi
 
 if command -v adb >/dev/null 2>&1 && adb get-state >/dev/null 2>&1; then
-    echo "[sidesystem-connect] USB-C adb detected — forwarding tcp:${LOCAL_PORT} -> tcp:${VNC_PORT} (~0.3 ms RTT)"
+    USE_ADB=1
+    echo "[sidesystem-connect] USB-C adb detected — syncing Razr display to ${MON_RES} (scale=${MON_SCALE}) & forwarding tcp:${LOCAL_PORT} -> tcp:${VNC_PORT}"
     adb forward "tcp:${LOCAL_PORT}" "tcp:${VNC_PORT}" >/dev/null
+    # Live-resize Razr HEADLESS-1 to match active host monitor edge-to-edge
+    adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.config({ monitor = { \\\\\\\"HEADLESS-1, ${MON_RES}, 0x0, ${MON_SCALE}\\\\\\\" } })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
     TARGET_HOST="127.0.0.1:${LOCAL_PORT}"
 else
     RAZR_IP="${1:-192.168.1.185}"
@@ -18,12 +38,14 @@ else
     TARGET_HOST="${RAZR_IP}:${VNC_PORT}"
 fi
 
+VNC_ARGS=(-RemoteResize=1 -Shared=1 -FullscreenSystemKeys=1)
+
 if command -v vncviewer >/dev/null 2>&1; then
-    exec vncviewer -RemoteResize=0 -Shared=1 "$TARGET_HOST"
+    exec vncviewer "${VNC_ARGS[@]}" "$TARGET_HOST"
 elif command -v wlvncc >/dev/null 2>&1; then
     exec wlvncc "${TARGET_HOST%:*}" "${TARGET_HOST#*:}"
 elif command -v nix >/dev/null 2>&1; then
-    exec nix run nixpkgs#tigervnc -- -RemoteResize=0 -Shared=1 "$TARGET_HOST"
+    exec nix run nixpkgs#tigervnc -- "${VNC_ARGS[@]}" "$TARGET_HOST"
 else
     echo "ERROR: No VNC viewer found (install tigervnc or wlvncc). Target ready at ${TARGET_HOST}" >&2
     exit 1
