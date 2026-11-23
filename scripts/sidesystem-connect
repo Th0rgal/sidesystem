@@ -38,15 +38,13 @@ else
     TARGET_HOST="${RAZR_IP}:${VNC_PORT}"
 fi
 
-VNC_ARGS=(-RemoteResize=1 -Shared=1 -FullscreenSystemKeys=1)
-
-if command -v vncviewer >/dev/null 2>&1; then
-    exec vncviewer "${VNC_ARGS[@]}" "$TARGET_HOST"
-elif command -v wlvncc >/dev/null 2>&1; then
+if command -v wlvncc >/dev/null 2>&1; then
     exec wlvncc "${TARGET_HOST%:*}" "${TARGET_HOST#*:}"
 elif command -v nix >/dev/null 2>&1; then
-    exec nix run nixpkgs#tigervnc -- "${VNC_ARGS[@]}" "$TARGET_HOST"
+    exec nix run nixpkgs#wlvncc -- "${TARGET_HOST%:*}" "${TARGET_HOST#*:}"
+elif command -v vncviewer >/dev/null 2>&1; then
+    exec vncviewer -RemoteResize=1 -Shared=1 -FullscreenSystemKeys=1 "$TARGET_HOST"
 else
-    echo "ERROR: No VNC viewer found (install tigervnc or wlvncc). Target ready at ${TARGET_HOST}" >&2
+    echo "ERROR: No VNC viewer found (install wlvncc or tigervnc). Target ready at ${TARGET_HOST}" >&2
     exit 1
 fi

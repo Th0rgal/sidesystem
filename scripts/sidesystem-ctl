@@ -829,7 +829,7 @@ fi
 # Launch wayvnc attached to headless sway's Wayland socket on 127.0.0.1:<VNC_PORT>.
 # -r renders the Wayland cursor into the stream so BT mouse & remote pointer stay visible.
 WAYLAND_DISPLAY="$SWAY_SOCK" \
-    nohup wayvnc -r 127.0.0.1 "$VNC_PORT" >"${XDG_RUNTIME_DIR}/wayvnc.log" 2>&1 </dev/null &
+    nohup wayvnc -r -f 60 127.0.0.1 "$VNC_PORT" >"${XDG_RUNTIME_DIR}/wayvnc.log" 2>&1 </dev/null &
 
 exit 0
 EOF
