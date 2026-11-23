@@ -30,7 +30,7 @@ if command -v adb >/dev/null 2>&1 && adb get-state >/dev/null 2>&1; then
     echo "[sidesystem-connect] USB-C adb detected — syncing Razr display to ${MON_RES} (scale=${MON_SCALE}) & forwarding tcp:${LOCAL_PORT} -> tcp:${VNC_PORT}"
     adb forward "tcp:${LOCAL_PORT}" "tcp:${VNC_PORT}" >/dev/null
     # Live-resize Razr HEADLESS-1 to match active host monitor edge-to-edge
-    adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.config({ monitor = { \\\\\\\"HEADLESS-1, ${MON_RES}, 0x0, ${MON_SCALE}\\\\\\\" } })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
+    adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /bin/sh -c \"su -s /bin/sh - thomas -c '\''set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \\\"hl.monitor({ output = \\\\\\\"HEADLESS-1\\\\\\\", mode = \\\\\\\"${MON_RES}\\\\\\\", position = \\\\\\\"0x0\\\\\\\", scale = \\\\\\\"${MON_SCALE}\\\\\\\" })\\\" >/dev/null 2>&1'\''\"'" >/dev/null 2>&1 || true
     TARGET_HOST="127.0.0.1:${LOCAL_PORT}"
 else
     RAZR_IP="${1:-192.168.1.185}"
