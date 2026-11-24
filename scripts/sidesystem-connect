@@ -128,7 +128,7 @@ if [ "$MODE" = "moonlight" ]; then
 if ! pgrep -x sunshine >/dev/null 2>&1; then
     XDG_RT=/tmp/xdg-razr
     SIG=$(ls "$XDG_RT/hypr/" 2>/dev/null | head -n1)
-    RUN_CMD="export HOME=/home/thomas XDG_RUNTIME_DIR=\"$XDG_RT\" WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=\"$SIG\" PATH=/run/current-system/sw/bin:/etc/profiles/per-user/thomas/bin; setsid nohup sunshine /home/thomas/.config/sunshine/sunshine.conf >/tmp/sunshine.log 2>&1 </dev/null &"
+    RUN_CMD="set -a; [ -f /tmp/xdg-razr/session.env ] && . /tmp/xdg-razr/session.env; set +a; export HOME=/home/thomas XDG_RUNTIME_DIR=\"$XDG_RT\" WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=\"$SIG\" PATH=/run/current-system/sw/bin:/etc/profiles/per-user/thomas/bin; setsid nohup sunshine /home/thomas/.config/sunshine/sunshine.conf >/tmp/sunshine.log 2>&1 </dev/null &"
     if [ "$(id -u)" -eq 0 ]; then
         runuser -u thomas -- /run/current-system/sw/bin/bash -c "$RUN_CMD"
     else
@@ -154,16 +154,51 @@ fi' >/dev/null 2>&1 || true
     STREAM_H="$MON_H"
 
     if [ "$RES_MODE" = "phone" ]; then
-        # Preserve the Razr's live phone resolution & aspect ratio so both screens mirror 1:1
+        # Preserve the Razr's live phone resolution & aspect ratio so both screens mirror 1:1.
+        # If HEADLESS-1 was left at a computer resolution (e.g. 2560x1600 / 1920x1080),
+        # restore the Razr's native phone aspect ratio (2100x900 landscape or 900x2100 portrait).
+        razr_exec 'mkdir -p /var/lib/sidesystem && printf "phone\n" > /var/lib/sidesystem/res-owner 2>/dev/null || true' >/dev/null 2>&1 || true
         cur_mon="$(razr_exec 'XDG_RT=/tmp/xdg-razr; SIG=$(ls "$XDG_RT/hypr/" 2>/dev/null | head -n1); [ -n "$SIG" ] && XDG_RUNTIME_DIR="$XDG_RT" HYPRLAND_INSTANCE_SIGNATURE="$SIG" /run/current-system/sw/bin/hyprctl monitors -j 2>/dev/null | /run/current-system/sw/bin/jq -r ".[0] | \"\(.width) \(.height)\""' | tail -n 1)"
+        cw=0; ch=0
         if [ -n "$cur_mon" ]; then
             read -r cw ch <<< "$cur_mon"
-            if [[ "${cw:-}" =~ ^[0-9]+$ ]] && [[ "${ch:-}" =~ ^[0-9]+$ ]] && [ "$cw" -ge 320 ] && [ "$ch" -ge 320 ]; then
-                STREAM_W="$cw"
-                STREAM_H="$ch"
-            fi
         fi
-        echo "[sidesystem-connect] Resolution priority: PHONE (preserving ${STREAM_W}x${STREAM_H}@${MON_HZ})"
+        # Check whether current HEADLESS-1 is a computer aspect ratio (1.25..1.85) instead of phone (~2.33 or ~0.43)
+        is_computer_ar=0
+        if [[ "${cw:-0}" =~ ^[0-9]+$ ]] && [[ "${ch:-0}" =~ ^[0-9]+$ ]] && [ "$cw" -ge 320 ] && [ "$ch" -ge 320 ]; then
+            ratio_x100=$(( cw * 100 / ch ))
+            if [ "$ratio_x100" -ge 125 ] && [ "$ratio_x100" -le 185 ]; then
+                is_computer_ar=1
+            fi
+        else
+            is_computer_ar=1
+        fi
+        if [ "$is_computer_ar" -eq 1 ]; then
+            # Detect phone orientation via adb if connected (rotation 1/3 = landscape, 0/2 = portrait)
+            phone_w=2100
+            phone_h=900
+            if [ "$USE_ADB" -eq 1 ]; then
+                rot="$(adb shell 'dumpsys input 2>/dev/null | grep -m1 "SurfaceOrientation:" | awk "{print \$2}"' 2>/dev/null | tr -d '\r\n ' || true)"
+                if [ "$rot" = "0" ] || [ "$rot" = "2" ]; then
+                    phone_w=900
+                    phone_h=2100
+                fi
+            fi
+            STREAM_W="$phone_w"
+            STREAM_H="$phone_h"
+            razr_exec "
+RUN_CMD='set -a; . /tmp/xdg-razr/session.env; set +a; /run/current-system/sw/bin/hyprctl eval \"hl.monitor({ output = \\\"HEADLESS-1\\\", mode = \\\"${STREAM_W}x${STREAM_H}@60\\\", position = \\\"0x0\\\", scale = \\\"1.5\\\" })\" >/dev/null 2>&1'
+if [ \"\$(id -u)\" -eq 0 ]; then
+    runuser -u thomas -- /run/current-system/sw/bin/bash -c \"\$RUN_CMD\"
+else
+    /run/current-system/sw/bin/bash -c \"\$RUN_CMD\"
+fi" >/dev/null 2>&1 || true
+            sleep 0.3
+        else
+            STREAM_W="$cw"
+            STREAM_H="$ch"
+        fi
+        echo "[sidesystem-connect] Resolution priority: PHONE (mirroring ${STREAM_W}x${STREAM_H}@${MON_HZ})"
     else
         # Computer takes resolution priority: sync HEADLESS-1 to Mac's focused monitor
         razr_exec "
