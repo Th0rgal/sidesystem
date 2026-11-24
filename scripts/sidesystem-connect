@@ -102,12 +102,31 @@ razr_exec() {
 }
 
 if [ "$MODE" = "moonlight" ]; then
-    if [ "$USE_ADB" -eq 1 ]; then
-        if ! timeout 1 bash -c "</dev/tcp/${RAZR_IP}/47989" 2>/dev/null; then
-            echo "[sidesystem-connect] Razr desktop/Sunshine not running — starting automatically..."
-            adb shell "su -c '/data/local/nixos/bin/sidesystem-ctl desktop start ${MON_W}x${MON_H} 1.5 hw'" >/dev/null 2>&1 || true
-            sleep 2
+    # Start Sunshine + bt-hid-bridge on demand (works over USB adb OR cable-free Wi-Fi SSH)
+    # and tear them down when Moonlight exits so libvirtualhid never keeps a fake keyboard/mouse
+    # registered in Android when disconnected (also saves ~5% idle battery!).
+    cleanup_sunshine() {
+        if [ "$USE_ADB" -eq 1 ]; then
+            adb shell 'su -c "killall bt-hid-bridge 2>/dev/null || true"' >/dev/null 2>&1 || true
         fi
+        razr_exec 'pkill -9 -f "/bin/sunshine" 2>/dev/null || true' >/dev/null 2>&1 || true
+    }
+    trap cleanup_sunshine EXIT INT TERM
+
+    if ! timeout 1 bash -c "</dev/tcp/${RAZR_IP}/47989" 2>/dev/null; then
+        echo "[sidesystem-connect] Starting Sunshine on demand..."
+        if [ "$USE_ADB" -eq 1 ]; then
+            # Start desktop if not running, then ensure sunshine is up
+            adb shell "su -c '/data/local/nixos/bin/droidspaces --name=razr run /run/current-system/sw/bin/bash -c \"pgrep -f Hyprland >/dev/null 2>&1\"'" >/dev/null 2>&1 \
+                || adb shell "su -c '/data/local/nixos/bin/sidesystem-ctl desktop start ${MON_W}x${MON_H} 1.5 hw'" >/dev/null 2>&1 || true
+        fi
+        razr_exec 'if ! pgrep -f "/bin/sunshine" >/dev/null 2>&1; then XDG_RT=/tmp/xdg-razr; SIG=$(ls "$XDG_RT/hypr/" 2>/dev/null | head -n1); runuser -u thomas -- env HOME=/home/thomas XDG_RUNTIME_DIR="$XDG_RT" WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE="$SIG" PATH=/run/current-system/sw/bin:/etc/profiles/per-user/thomas/bin bash -c "nohup sunshine /home/thomas/.config/sunshine/sunshine.conf >/tmp/sunshine.log 2>&1 </dev/null &"; fi' >/dev/null 2>&1 || true
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            timeout 0.5 bash -c "</dev/tcp/${RAZR_IP}/47989" 2>/dev/null && break
+            sleep 0.4
+        done
+    fi
+    if [ "$USE_ADB" -eq 1 ]; then
         adb shell 'su -c "killall bt-hid-bridge 2>/dev/null || true; sleep 0.2; setsid /data/local/nixos/bin/bt-hid-bridge --sunshine 5900 >/data/local/nixos/sunshine-input.log 2>&1 </dev/null &"' </dev/null >/dev/null 2>&1 &
         sleep 0.3
     fi
@@ -156,15 +175,16 @@ if [ "$MODE" = "moonlight" ]; then
         --no-frame-pacing
     )
     if command -v moonlight >/dev/null 2>&1; then
-        exec moonlight "${ML_ARGS[@]}"
+        moonlight "${ML_ARGS[@]}"
     elif [ -x /nix/store/j5b76lij5nhyv6hz6i2kpwimzfki4y4l-moonlight-qt-6.2.0/bin/moonlight ]; then
-        exec /nix/store/j5b76lij5nhyv6hz6i2kpwimzfki4y4l-moonlight-qt-6.2.0/bin/moonlight "${ML_ARGS[@]}"
+        /nix/store/j5b76lij5nhyv6hz6i2kpwimzfki4y4l-moonlight-qt-6.2.0/bin/moonlight "${ML_ARGS[@]}"
     elif command -v nix >/dev/null 2>&1; then
-        exec nix run nixpkgs#moonlight-qt -- "${ML_ARGS[@]}"
+        nix run nixpkgs#moonlight-qt -- "${ML_ARGS[@]}"
     else
         echo "ERROR: moonlight not found." >&2
         exit 1
     fi
+    exit $?
 fi
 
 # --- VNC fallback (--vnc) ---
